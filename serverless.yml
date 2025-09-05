@@ -1,0 +1,211 @@
+service: appointment-service
+frameworkVersion: '4'
+
+provider:
+  name: aws
+  runtime: nodejs20.x
+  region: ${env:AWS_REGION, 'us-east-2'}
+  stage: ${env:STAGE, 'dev'}
+  iam:
+    role:
+      statements:
+        - Effect: Allow
+          Action:
+            - dynamodb:PutItem
+            - dynamodb:UpdateItem
+            - dynamodb:Query
+            - dynamodb:GetItem
+          Resource:
+            - arn:aws:dynamodb:${self:provider.region}:*:table/${self:custom.ddbTable}
+            - arn:aws:dynamodb:${self:provider.region}:*:table/${self:custom.ddbTable}/index/*
+        - Effect: Allow
+          Action: sns:Publish
+          Resource: "*"
+        - Effect: Allow
+          Action:
+            - sqs:SendMessage
+            - sqs:ReceiveMessage
+            - sqs:DeleteMessage
+            - sqs:GetQueueAttributes
+          Resource: "*"
+        - Effect: Allow
+          Action:
+            - events:PutEvents
+          Resource: "*"
+
+  environment:
+    DDB_TABLE: ${self:custom.ddbTable}
+    SNS_TOPIC_ARN: !Ref Topic
+    SQS_PE_URL: !Ref QueuePE
+    SQS_CL_URL: !Ref QueueCL
+    COMPLETION_SQS_URL: !Ref CompletionQueue
+    EVENT_BUS_NAME: ${self:custom.eventBusName}
+
+plugins:
+  - serverless-offline
+  - serverless-dotenv-plugin
+
+package:
+  individually: true
+
+custom:
+  ddbTable: ${env:DDB_TABLE_NAME, 'Appointments'}
+  eventBusName: ${env:EVENT_BUS_NAME, 'appointment-bus'}
+  esbuild:
+    bundle: true
+    minify: true
+    target: 'node20'
+    platform: 'node'
+    sourcemap: true
+    exclude: ['@aws-sdk/*']
+
+functions:
+  appointment:
+    handler: src/infrastructure/api/appointment.handler
+    events:
+      - httpApi:
+          path: /appointments
+          method: post
+      - httpApi:
+          path: /appointments/{insuredId}
+          method: get
+      - httpApi:
+          path: /openapi.json
+          method: get
+      - sqs:
+          arn: { 'Fn::GetAtt': [ CompletionQueue, Arn ] }
+
+  appointment_pe:
+    handler: src/infrastructure/api/appointment_pe.handler
+    events:
+      - sqs:
+          arn: { 'Fn::GetAtt': [ QueuePE, Arn ] }
+
+  appointment_cl:
+    handler: src/infrastructure/api/appointment_cl.handler
+    events:
+      - sqs:
+          arn: { 'Fn::GetAtt': [ QueueCL, Arn ] }
+
+resources:
+  Resources:
+    AppointmentsTable:
+      Type: AWS::DynamoDB::Table
+      Properties:
+        TableName: ${self:custom.ddbTable}
+        BillingMode: PAY_PER_REQUEST
+        AttributeDefinitions:
+          - AttributeName: insuredId
+            AttributeType: S
+          - AttributeName: appointmentId
+            AttributeType: S
+        KeySchema:
+          - AttributeName: insuredId
+            KeyType: HASH
+          - AttributeName: appointmentId
+            KeyType: RANGE
+        GlobalSecondaryIndexes:
+          - IndexName: appointmentIdIndex
+            KeySchema:
+              - AttributeName: appointmentId
+                KeyType: HASH
+            Projection:
+              ProjectionType: ALL
+
+    Topic:
+      Type: AWS::SNS::Topic
+      Properties:
+        TopicName: appointment-topic
+
+    QueuePE:
+      Type: AWS::SQS::Queue
+      Properties:
+        QueueName: SQS_PE
+
+    QueueCL:
+      Type: AWS::SQS::Queue
+      Properties:
+        QueueName: SQS_CL
+
+    QueuePolicyPE:
+      Type: AWS::SQS::QueuePolicy
+      Properties:
+        Queues:
+          - !Ref QueuePE
+        PolicyDocument:
+          Statement:
+            - Effect: Allow
+              Principal: "*"
+              Action: "SQS:SendMessage"
+              Resource: !GetAtt QueuePE.Arn
+              Condition:
+                ArnEquals:
+                  aws:SourceArn: !GetAtt Topic.Arn
+
+    QueuePolicyCL:
+      Type: AWS::SQS::QueuePolicy
+      Properties:
+        Queues:
+          - !Ref QueueCL
+        PolicyDocument:
+          Statement:
+            - Effect: Allow
+              Principal: "*"
+              Action: "SQS:SendMessage"
+              Resource: !GetAtt QueueCL.Arn
+              Condition:
+                ArnEquals:
+                  aws:SourceArn: !GetAtt Topic.Arn
+
+    TopicSubscriptionPE:
+      Type: AWS::SNS::Subscription
+      Properties:
+        TopicArn: { Ref: Topic }
+        Protocol: sqs
+        Endpoint: { 'Fn::GetAtt': [ QueuePE, Arn ] }
+        FilterPolicy:
+          countryISO:
+            - PE
+
+    TopicSubscriptionCL:
+      Type: AWS::SNS::Subscription
+      Properties:
+        TopicArn: { Ref: Topic }
+        Protocol: sqs
+        Endpoint: { 'Fn::GetAtt': [ QueueCL, Arn ] }
+        FilterPolicy:
+          countryISO:
+            - CL
+
+    CompletionQueue:
+      Type: AWS::SQS::Queue
+      Properties:
+        QueueName: appointment-completed
+
+    EventBus:
+      Type: AWS::Events::EventBus
+      Properties:
+        Name: ${self:custom.eventBusName}
+
+    EventRuleToCompletionQueue:
+      Type: AWS::Events::Rule
+      Properties:
+        EventBusName: ${self:custom.eventBusName}
+        EventPattern:
+          source:
+            - "appointment.processor"
+          detail-type:
+            - "AppointmentProcessed"
+        Targets:
+          - Arn: { 'Fn::GetAtt': [ CompletionQueue, Arn ] }
+            Id: "CompletionQueueTarget"
+
+  Outputs:
+    SnsTopicArn:
+      Value: !Ref Topic
+    SqsPEUrl:
+      Value: !Ref QueuePE
+    SqsCLUrl:
+      Value: !Ref QueueCL
+    CompletionSqsUrl:
+      Value: !Ref CompletionQueue
