@@ -13,7 +13,7 @@ Backend de agendamiento de citas médicas para PE/CL en AWS:
 - RDS MySQL existente (crea dos bases o dos esquemas): `appointments_pe`, `appointments_cl`
 
 ## Variables de entorno
-Copia `.env.example` a tu entorno (o exporta variables) antes de `serverless deploy`:
+Copia `.env` a tu entorno (o exporta variables) antes de `serverless deploy`:
 - `AWS_REGION` (ej. us-east-1)
 - `STAGE` (ej. dev)
 - `DDB_TABLE_NAME` (por defecto `Appointments`)
